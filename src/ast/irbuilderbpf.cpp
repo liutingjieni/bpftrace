@@ -865,6 +865,148 @@ Value *IRBuilderBPF::CreateStrncmp(Value *val1,
   return result;
 }
 
+Value *IRBuilderBPF::CreateStrstr(Value *val1,
+                                  Value *val2,
+                                  uint64_t n1,
+                                  uint64_t n2,
+                                  bool inverse)
+{
+  /*
+  // This function compares whether the string val1 contains the string val2.
+  // It returns true if val2 is contained by val1, false if not contained.
+  // strstr(String val1, String val2, int n1, int n2)
+     {
+        for (size_t j = 0; (n1 >= n2) && (j <= n1 - n2); j++)
+        {
+          for (size_t i = 0; i < n2; i++)
+          {
+            if (val2[i] == NULL)
+            {
+              return true;
+            }
+            if (val1[i + j] != val2[i])
+            {
+              break;
+            }
+          }
+          if (val1[j] == NULL) {
+            return false;
+          }
+        }
+        return false;
+     }
+  */
+  // Check if the compared strings are literals.
+  // If so, we can avoid storing the literal in memory.
+  std::optional<std::string> literal1;
+  if (auto constString1 = dyn_cast<ConstantDataArray>(val1))
+    literal1 = constString1->getAsString();
+  else if (isa<ConstantAggregateZero>(val1))
+    literal1 = "";
+  else
+    literal1 = std::nullopt;
+
+  std::optional<std::string> literal2;
+  if (auto constString2 = dyn_cast<ConstantDataArray>(val2))
+    literal2 = constString2->getAsString();
+  else if (isa<ConstantAggregateZero>(val2))
+    literal2 = "";
+  else
+    literal2 = std::nullopt;
+
+  auto *val1p = dyn_cast<PointerType>(val1->getType());
+  auto *val2p = dyn_cast<PointerType>(val2->getType());
+
+  Function *parent = GetInsertBlock()->getParent();
+  AllocaInst *store = CreateAllocaBPF(getInt1Ty(), "strstr.result");
+  BasicBlock *done_true = BasicBlock::Create(module_.getContext(),
+                                          "strstr.true",
+                                          parent);
+  BasicBlock *done_false = BasicBlock::Create(module_.getContext(),
+                                        "strstr.false",
+                                        parent);
+
+  CreateStore(getInt1(inverse), store);
+
+  Value *null_byte = getInt8(0);
+  for (size_t j = 0; (n1 >= n2) && (j <= n1 - n2); j++)
+  {
+    BasicBlock *one_loop = BasicBlock::Create(module_.getContext(),
+                                               "one.loop",
+                                               parent);
+
+    Value *str_c;
+    if (literal1)
+      str_c = getInt8(literal1->c_str()[j]);
+    else
+    {
+      auto *ptr_str = CreateGEP(val1p->getPointerElementType(),
+                            val1,
+                            { getInt32(0), getInt32(j) });
+      str_c = CreateLoad(getInt8Ty(), ptr_str);
+    }
+    
+    for (size_t i = 0; i < n2; i++)
+    {
+      BasicBlock *two_loop = BasicBlock::Create(module_.getContext(),
+                                               "two.loop",
+                                               parent);
+      BasicBlock *loop_cmp_char = BasicBlock::Create(module_.getContext(),
+                                                      "strstr.loop_cmp_char",
+                                                      parent);
+
+      Value *l;
+      if (literal1)
+        l = getInt8(literal1->c_str()[i + j]);
+      else
+      {
+        auto *ptr_l = CreateGEP(val1p->getPointerElementType(),
+                                val1,
+                                { getInt32(0), getInt32(i + j) });
+        l = CreateLoad(getInt8Ty(), ptr_l);
+      }
+
+      Value *r;
+      if (literal2)
+        r = getInt8(literal2->c_str()[i]);
+      else
+      {
+        auto *ptr_r = CreateGEP(val2p->getPointerElementType(),
+                                val2,
+                                { getInt32(0), getInt32(i) });
+        r = CreateLoad(getInt8Ty(), ptr_r);
+      }
+      
+      Value *cmp_null = CreateICmpEQ(r, null_byte, "strstr.cmp_null");
+      CreateCondBr(cmp_null, done_true, loop_cmp_char);
+
+      SetInsertPoint(loop_cmp_char);
+
+      Value *cmp = CreateICmpNE(l, r, "strcmp.cmp");
+      CreateCondBr(cmp, one_loop, two_loop);
+
+      SetInsertPoint(two_loop);
+    }
+    Value *cmp_null = CreateICmpEQ(str_c, null_byte, "strstr.cmp_null");
+    CreateCondBr(cmp_null, done_false, one_loop);
+
+    SetInsertPoint(one_loop);
+  }
+  CreateBr(done_false);
+  SetInsertPoint(done_false);
+  CreateStore(getInt1(!inverse), store);
+  
+  CreateBr(done_true);
+  SetInsertPoint(done_true);
+
+  // store is a pointer to bool (i1 *)
+  Value *result = CreateLoad(getInt1Ty(), store);
+  CreateLifetimeEnd(store);
+  result = CreateIntCast(result, getInt64Ty(), false);
+
+  return result;
+}
+
 CallInst *IRBuilderBPF::CreateGetNs(bool boot_time, const location &loc)
 {
   // u64 ktime_get_ns()
