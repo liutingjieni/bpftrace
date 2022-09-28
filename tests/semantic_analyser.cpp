@@ -2035,6 +2035,26 @@ TEST(semantic_analyser, strncmp_posparam)
   test(bpftrace, "i:s:1 { strncmp(\"foo\", \"bar\", $2) }", 1);
 }
 
+TEST(semantic_analyser, strstr)
+{
+  // Test strncmp builtin
+  test("i:s:1 { $a = \"bar\"; strstr(\"foo\", $a) }", 0);
+  test("i:s:1 { strstr(\"foo\", \"bar\") }", 0);
+  test("i:s:1 { strstr(1) }", 1);
+  test("i:s:1 { strstr(1,1) }", 10);
+  test("i:s:1 { strstr(\"a\",1) }", 10);
+  test("i:s:1 { strstr(\"a\",\"a\",-1) }", 1);
+  test("i:s:1 { strstr(\"a\",\"a\",\"foo\") }", 1);
+}
+
+TEST(semantic_analyser, strstr_posparam)
+{
+  BPFtrace bpftrace;
+  bpftrace.add_param("hello");
+  test(bpftrace, "i:s:1 { strncmp(\"foo\", $1) }", 0);
+  test(bpftrace, "i:s:1 { strncmp(\"foo\", \"bar\", $2) }", 1);
+}
+
 TEST(semantic_analyser, override)
 {
   // literals

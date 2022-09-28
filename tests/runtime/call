@@ -326,6 +326,13 @@ REQUIRES_FEATURE dpath kfunc
 TIMEOUT 5
 AFTER ./testprogs/syscall read
 
+NAME path
+RUN {{BPFTRACE}} -ve 'kfunc:filp_close { $f = path(args->filp->f_path); if (!strstr($f, "bpftrace_runtime_test_syscall_gen_read_temp")) { printf("OK\n"); exit(); } }'
+EXPECT OK
+REQUIRES_FEATURE dpath kfunc
+TIMEOUT 5
+AFTER ./testprogs/syscall read
+
 NAME path_in_unsupported_kfunc
 PROG kfunc:vfs_read { print(path(args->file->f_path)); }
 EXPECT \nstdin:1:18-48: ERROR: helper bpf_d_path not supported in probe\n
