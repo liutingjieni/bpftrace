@@ -116,7 +116,11 @@ public:
                                 AddrSpace as,
                                 const location &loc);
   Value *CreateStrncmp(Value *val1, Value *val2, uint64_t n, bool inverse);
-  Value *CreateStrstr(Value *val1, Value *val2, uint64_t n1, uint64_t n2, bool inverse);
+  Value *CreateStrstr(Value *val1,
+                      Value *val2,
+                      uint64_t n1,
+                      uint64_t n2,
+                      bool inverse);
   CallInst *CreateGetNs(bool boot_time, const location &loc);
   CallInst *CreateGetPidTgid(const location &loc);
   CallInst *CreateGetCurrentCgroupId(const location &loc);

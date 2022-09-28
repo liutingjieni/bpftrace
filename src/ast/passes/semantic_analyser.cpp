@@ -1239,8 +1239,10 @@ void SemanticAnalyser::visit(Call &call)
     }
     call.type = CreateUInt64();
   }
-  else if (call.func == "strstr") {
-    if (check_nargs(call, 2)) {
+  else if (call.func == "strstr")
+  {
+    if (check_nargs(call, 2))
+    {
       check_arg(call, Type::string, 0);
       check_arg(call, Type::string, 1);
     }

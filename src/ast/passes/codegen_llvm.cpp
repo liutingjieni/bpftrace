@@ -1136,15 +1136,19 @@ void CodegenLLVM::visit(Call &call)
     expr_ = b_.CreateStrncmp(
         left_string.first, right_string.first, size, false);
   }
-  else if (call.func == "strstr") {
-    const auto& left_arg = call.vargs->at(0);
-    const auto& right_arg = call.vargs->at(1);
+  else if (call.func == "strstr")
+  {
+    const auto &left_arg = call.vargs->at(0);
+    const auto &right_arg = call.vargs->at(1);
 
     auto left_string = getString(left_arg);
     auto right_string = getString(right_arg);
 
-    expr_ = b_.CreateStrstr(
-        left_string.first, right_string.first, left_string.second, right_string.second, false);
+    expr_ = b_.CreateStrstr(left_string.first,
+                            right_string.first,
+                            left_string.second,
+                            right_string.second,
+                            false);
   }
   else if (call.func == "override")
   {
