@@ -920,11 +920,11 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
   Function *parent = GetInsertBlock()->getParent();
   AllocaInst *store = CreateAllocaBPF(getInt1Ty(), "strstr.result");
   BasicBlock *done_true = BasicBlock::Create(module_.getContext(),
-                                          "strstr.true",
-                                          parent);
+                                             "strstr.true",
+                                             parent);
   BasicBlock *done_false = BasicBlock::Create(module_.getContext(),
-                                        "strstr.false",
-                                        parent);
+                                              "strstr.false",
+                                              parent);
 
   CreateStore(getInt1(inverse), store);
 
@@ -932,8 +932,8 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
   for (size_t j = 0; (n1 >= n2) && (j <= n1 - n2); j++)
   {
     BasicBlock *one_loop = BasicBlock::Create(module_.getContext(),
-                                               "one.loop",
-                                               parent);
+                                              "one.loop",
+                                              parent);
 
     Value *str_c;
     if (literal1)
@@ -941,19 +941,19 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
     else
     {
       auto *ptr_str = CreateGEP(val1p->getPointerElementType(),
-                            val1,
-                            { getInt32(0), getInt32(j) });
+                                val1,
+                                { getInt32(0), getInt32(j) });
       str_c = CreateLoad(getInt8Ty(), ptr_str);
     }
-    
+
     for (size_t i = 0; i < n2; i++)
     {
       BasicBlock *two_loop = BasicBlock::Create(module_.getContext(),
-                                               "two.loop",
-                                               parent);
+                                                "two.loop",
+                                                parent);
       BasicBlock *loop_cmp_char = BasicBlock::Create(module_.getContext(),
-                                                      "strstr.loop_cmp_char",
-                                                      parent);
+                                                     "strstr.loop_cmp_char",
+                                                     parent);
 
       Value *l;
       if (literal1)
@@ -976,7 +976,7 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
                                 { getInt32(0), getInt32(i) });
         r = CreateLoad(getInt8Ty(), ptr_r);
       }
-      
+
       Value *cmp_null = CreateICmpEQ(r, null_byte, "strstr.cmp_null");
       CreateCondBr(cmp_null, done_true, loop_cmp_char);
 
@@ -995,7 +995,7 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
   CreateBr(done_false);
   SetInsertPoint(done_false);
   CreateStore(getInt1(!inverse), store);
-  
+
   CreateBr(done_true);
   SetInsertPoint(done_true);
 
