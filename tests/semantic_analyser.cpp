@@ -2051,7 +2051,7 @@ TEST(semantic_analyser, strstr_posparam)
 {
   BPFtrace bpftrace;
   bpftrace.add_param("hello");
-  test(bpftrace, "i:s:1 { strstr(\"foo\", $1) }", 0);
+  test(bpftrace, "i:s:1 { strstr(\"foo\", str($1)) }", 0);
 }
 
 TEST(semantic_analyser, override)
