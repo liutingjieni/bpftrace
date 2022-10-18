@@ -2043,8 +2043,6 @@ TEST(semantic_analyser, strstr)
   test("i:s:1 { strstr(1) }", 1);
   test("i:s:1 { strstr(1,1) }", 10);
   test("i:s:1 { strstr(\"a\",1) }", 10);
-  test("i:s:1 { strstr(\"a\",\"a\",-1) }", 1);
-  test("i:s:1 { strstr(\"a\",\"a\",\"foo\") }", 1);
 }
 
 TEST(semantic_analyser, strstr_posparam)
