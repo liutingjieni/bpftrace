@@ -5,6 +5,8 @@
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/IRBuilder.h>
 
+#include <optional>
+
 #include "ast/ast.h"
 #include "bpftrace.h"
 #include "types.h"
@@ -79,25 +81,33 @@ public:
                            const location &loc);
   void CreateProbeRead(Value *ctx,
                        Value *dst,
-                       size_t size,
-                       Value *src,
-                       AddrSpace as,
-                       const location &loc);
-  void CreateProbeRead(Value *ctx,
-                       Value *dst,
                        llvm::Value *size,
                        Value *src,
                        AddrSpace as,
                        const location &loc);
+  // Emits a bpf_probe_read call in which the size is derived from the SizedType
+  // argument. Has special handling for certain types such as pointers where the
+  // size depends on the host system as well as the probe type.
+  // If provided, the optional AddrSpace argument is used instead of the type's
+  // address space (which may not always be set).
+  void CreateProbeRead(Value *ctx,
+                       Value *dest,
+                       const SizedType &type,
+                       Value *src,
+                       const location &loc,
+                       std::optional<AddrSpace> addrSpace = std::nullopt);
+  // Emits the load instruction the type of which is derived from the provided
+  // SizedType. Used to access elements from structures that ctx points to, or
+  // those that have already been pulled onto the BPF stack. Correctly handles
+  // pointer size differences (see CreateProbeRead).
+  llvm::Value *CreateDatastructElemLoad(
+      const SizedType &type,
+      llvm::Value *ptr,
+      bool isVolatile = false,
+      std::optional<AddrSpace> addrSpace = std::nullopt);
   CallInst *CreateProbeReadStr(Value *ctx,
-                               AllocaInst *dst,
+                               Value *dst,
                                llvm::Value *size,
-                               Value *src,
-                               AddrSpace as,
-                               const location &loc);
-  CallInst *CreateProbeReadStr(Value *ctx,
-                               AllocaInst *dst,
-                               size_t size,
                                Value *src,
                                AddrSpace as,
                                const location &loc);
@@ -115,7 +125,12 @@ public:
                                 pid_t pid,
                                 AddrSpace as,
                                 const location &loc);
-  Value *CreateStrncmp(Value *val1, Value *val2, uint64_t n, bool inverse);
+  Value *CreateStrncmp(Value *str1,
+                       uint64_t str1_size,
+                       Value *str2,
+                       uint64_t str2_size,
+                       uint64_t n,
+                       bool inverse);
   Value *CreateStrstr(Value *val1,
                       Value *val2,
                       uint64_t n1,
@@ -136,7 +151,10 @@ public:
                              ArrayRef<Value *> args,
                              const Twine &Name,
                              const location *loc = nullptr);
-  CallInst   *createCall(Value *callee, ArrayRef<Value *> args, const Twine &Name);
+  CallInst *createCall(FunctionType *callee_type,
+                       Value *callee,
+                       ArrayRef<Value *> args,
+                       const Twine &Name);
   void        CreateGetCurrentComm(Value *ctx, AllocaInst *buf, size_t size, const location& loc);
   void CreatePerfEventOutput(Value *ctx,
                              Value *data,
@@ -153,6 +171,7 @@ public:
   StructType *GetStructType(std::string name, const std::vector<llvm::Type *> & elements, bool packed = false);
   AllocaInst *CreateUSym(llvm::Value *val, const location &loc);
   Value *CreateRegisterRead(Value *ctx, const std::string &builtin);
+  Value *CreateRegisterRead(Value *ctx, int offset, const std::string &name);
   Value      *CreatKFuncArg(Value *ctx, SizedType& type, std::string& name);
   CallInst *CreateSkbOutput(Value *skb,
                             Value *len,
@@ -180,6 +199,9 @@ public:
   void hoist(const std::function<void()> &functor);
   int helper_error_id_ = 0;
 
+  // Returns the integer type used to represent pointers in traced code.
+  llvm::Type *getPointerStorageTy(AddrSpace as);
+
 private:
   Module &module_;
   BPFtrace &bpftrace_;
@@ -190,10 +212,10 @@ private:
                                 AddrSpace as,
                                 const location &loc);
   CallInst *createMapLookup(int mapid, Value *key);
-  Constant *createProbeReadStrFn(llvm::Type *dst,
-                                 llvm::Type *src,
-                                 AddrSpace as);
   libbpf::bpf_func_id selectProbeReadHelper(AddrSpace as, bool str);
+
+  llvm::Type *getKernelPointerStorageTy();
+  llvm::Type *getUserPointerStorageTy();
 
   std::map<std::string, StructType *> structs_;
 };

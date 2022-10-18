@@ -22,6 +22,7 @@
 #include "bpftrace.h"
 #include "log.h"
 #include "probe_matcher.h"
+#include "tracefs.h"
 #include "utils.h"
 #include <bcc/bcc_elf.h>
 #include <bcc/bcc_syms.h>
@@ -375,6 +376,12 @@ std::vector<std::string> get_kernel_cflags(
   // If ARCH env variable is set, pass this along.
   if (archenv)
     cflags.push_back("-D__TARGET_ARCH_" + arch);
+
+  if (arch == "arm")
+  {
+    // Required by several header files in arch/arm/include
+    cflags.push_back("-D__LINUX_ARM_ARCH__=7");
+  }
 
   return cflags;
 }
@@ -968,13 +975,12 @@ std::unordered_set<std::string> get_traceable_funcs()
   return {};
 #else
   // Try to get the list of functions from BPFTRACE_AVAILABLE_FUNCTIONS_TEST env
-  const char *path = std::getenv("BPFTRACE_AVAILABLE_FUNCTIONS_TEST");
+  const char *path_env = std::getenv("BPFTRACE_AVAILABLE_FUNCTIONS_TEST");
+  const std::string kprobe_path = path_env
+                                      ? path_env
+                                      : tracefs::available_filter_functions();
 
-  // Use kprobe list as default
-  if (!path)
-    path = kprobe_path.c_str();
-
-  std::ifstream available_funs(path);
+  std::ifstream available_funs(kprobe_path);
   if (available_funs.fail())
   {
     if (bt_debug != DebugLevel::kNone)
@@ -1183,6 +1189,25 @@ std::string strip_symbol_module(const std::string &symbol)
 {
   size_t idx = symbol.rfind(" [");
   return idx != std::string::npos ? symbol.substr(0, idx) : symbol;
+}
+
+int get_kernel_ptr_width()
+{
+  // We can't assume that sizeof(void*) in bpftrace is the same as the kernel
+  // pointer size (bpftrace can be compiled as a 32-bit binary and run on a
+  // 64-bit kernel), so we guess based on the machine field of struct utsname.
+  // Note that the uname() syscall can return different values for compat mode
+  // processes (e.g. "armv8l" instead of "aarch64"; see COMPAT_UTS_MACHINE), so
+  // make sure this is taken into account.
+  struct utsname utsname;
+  if (uname(&utsname) != 0)
+    LOG(FATAL) << "uname failed: " << strerror(errno);
+
+  const char *machine = utsname.machine;
+  if (!strncmp(machine, "armv7", 5))
+    return 32;
+
+  return 64;
 }
 
 } // namespace bpftrace

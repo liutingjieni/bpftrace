@@ -13,6 +13,7 @@
 
 #include "btf.h"
 #include "probe_matcher.h"
+#include "tracefs.h"
 #include "utils.h"
 
 namespace bpftrace {
@@ -100,13 +101,13 @@ bool BPFfeature::try_load(enum libbpf::bpf_prog_type prog_type,
   char logbuf[log_size] = {};
 
   std::optional<unsigned> btf_id;
-  if (prog_type == libbpf::BPF_PROG_TYPE_TRACING)
+  if (prog_type == libbpf::BPF_PROG_TYPE_TRACING && has_btf())
     btf_id = btf_.get_btf_id(name);
 
   if (prog_type == libbpf::BPF_PROG_TYPE_TRACING)
   {
     // List of available functions must be readable
-    std::ifstream traceable_funcs(kprobe_path);
+    std::ifstream traceable_funcs(tracefs::available_filter_functions());
     if (!traceable_funcs.good())
       return false;
   }

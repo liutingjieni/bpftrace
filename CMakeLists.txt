@@ -3,7 +3,7 @@ project(bpftrace)
 
 # bpftrace version number components.
 set(bpftrace_VERSION_MAJOR 0)
-set(bpftrace_VERSION_MINOR 15)
+set(bpftrace_VERSION_MINOR 16)
 set(bpftrace_VERSION_PATCH 0)
 
 include(GNUInstallDirs)
@@ -186,14 +186,6 @@ add_definitions(-DLLVM_VERSION_MAJOR=${LLVM_VERSION_MAJOR})
 add_definitions(-DLLVM_VERSION_MINOR=${LLVM_VERSION_MINOR})
 add_definitions(-DLLVM_VERSION_PATCH=${LLVM_VERSION_PATCH})
 
-if(${LLVM_VERSION_MAJOR} VERSION_GREATER_EQUAL 11)
-  set(LLVM_ORC_V2)
-  add_definitions(-DLLVM_ORC_V2)
-  message(STATUS "Using LLVM orcv2")
-else()
-  add_definitions(-DLLVM_ORC_V1)
-endif()
-
 if(EMBED_USE_LLVM)
   include(embed_clang)
 else()
@@ -302,3 +294,13 @@ add_subdirectory(tools)
 if (ENABLE_MAN)
   add_subdirectory(man)
 endif(ENABLE_MAN)
+
+if(NOT TARGET uninstall)
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CmakeUninstall.cmake.in"
+	"${CMAKE_CURRENT_BINARY_DIR}/CmakeUninstall.cmake"
+    IMMEDIATE @ONLY)
+
+  add_custom_target(uninstall
+	  COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/CmakeUninstall.cmake)
+endif()

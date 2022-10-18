@@ -18,13 +18,20 @@
 #endif
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#if LLVM_VERSION_MAJOR >= 14
+#include <llvm/MC/TargetRegistry.h>
+#else
+#include <llvm/Support/TargetRegistry.h>
+#endif
+
+#include <llvm/Support/TargetSelect.h>
 
 #include "arch/arch.h"
 #include "ast.h"
 #include "ast/async_event_types.h"
-#include "ast/bpforc/bpforc.h"
 #include "ast/codegen_helper.h"
 #include "ast/signal_bt.h"
+#include "elf_parser.h"
 #include "log.h"
 #include "tracepoint_format_parser.h"
 #include "types.h"
@@ -36,12 +43,28 @@ namespace ast {
 CodegenLLVM::CodegenLLVM(Node *root, BPFtrace &bpftrace)
     : root_(root),
       bpftrace_(bpftrace),
-      orc_(BpfOrc::Create()),
-      module_(std::make_unique<Module>("bpftrace", orc_->getContext())),
-      b_(orc_->getContext(), *module_.get(), bpftrace)
+      context_(std::make_unique<LLVMContext>()),
+      module_(std::make_unique<Module>("bpftrace", *context_)),
+      b_(*context_, *module_, bpftrace)
 {
-  module_->setDataLayout(datalayout());
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmPrinters();
+  std::string error_str;
+  auto target = llvm::TargetRegistry::lookupTarget(LLVMTargetTriple, error_str);
+  if (!target)
+    throw std::runtime_error(
+        "Could not find bpf llvm target, does your llvm support it?");
+
+  target_machine_.reset(target->createTargetMachine(LLVMTargetTriple,
+                                                    "generic",
+                                                    "",
+                                                    TargetOptions(),
+                                                    Optional<Reloc::Model>()));
+  target_machine_->setOptLevel(llvm::CodeGenOpt::Aggressive);
+
   module_->setTargetTriple(LLVMTargetTriple);
+  module_->setDataLayout(target_machine_->createDataLayout());
 }
 
 void CodegenLLVM::visit(Integer &integer)
@@ -246,17 +269,21 @@ void CodegenLLVM::visit(Builtin &builtin)
     }
 
     int arg_num = atoi(builtin.ident.substr(4).c_str());
-    Value *ctx = b_.CreatePointerCast(ctx_, b_.getInt64Ty()->getPointerTo());
-    Value *sp = b_.CreateLoad(
-        b_.getInt64Ty(),
-        b_.CreateGEP(b_.getInt64Ty(), ctx, b_.getInt64(sp_offset)),
-        "reg_sp");
-    dyn_cast<LoadInst>(sp)->setVolatile(true);
+    Value *sp = b_.CreateRegisterRead(ctx_, sp_offset, "reg_sp");
     AllocaInst *dst = b_.CreateAllocaBPF(builtin.type, builtin.ident);
-    Value *src = b_.CreateAdd(sp,
-                              b_.getInt64((arg_num + arch::arg_stack_offset()) *
-                                          sizeof(uintptr_t)));
-    b_.CreateProbeRead(ctx_, dst, 8, src, builtin.type.GetAS(), builtin.loc);
+
+    // Pointer width is used when calculating the SP offset and the number of
+    // bytes to read from stack for each argument. We pass a pointer SizedType
+    // to CreateProbeRead to make sure it uses the correct read size while
+    // keeping builtin.type an int64.
+    size_t arg_width =
+        b_.getPointerStorageTy(builtin.type.GetAS())->getIntegerBitWidth() / 8;
+    SizedType arg_type = CreatePointer(CreateInt8(), builtin.type.GetAS());
+    assert(builtin.type.GetSize() == arg_type.GetSize());
+
+    Value *src = b_.CreateAdd(
+        sp, b_.getInt64((arg_num + arch::arg_stack_offset()) * arg_width));
+    b_.CreateProbeRead(ctx_, dst, arg_type, src, builtin.loc);
     expr_ = b_.CreateLoad(b_.GetType(builtin.type), dst);
     b_.CreateLifetimeEnd(dst);
   }
@@ -655,10 +682,6 @@ void CodegenLLVM::visit(Call &call)
     auto arg0 = call.vargs->front();
     auto scoped_del = accept(arg0);
     auto addrspace = arg0->type.GetAS();
-    AllocaInst *first = b_.CreateAllocaBPF(b_.getInt64Ty(),
-                                           call.func + "_first");
-    AllocaInst *second = b_.CreateAllocaBPF(b_.getInt64Ty(),
-                                            call.func + "_second");
     Value *perfdata = b_.CreateGetJoinMap(ctx_, call.loc);
     Function *parent = b_.GetInsertBlock()->getParent();
 
@@ -687,8 +710,14 @@ void CodegenLLVM::visit(Call &call)
                        b_.CreateGEP(b_.getInt8Ty(), perfdata, b_.getInt64(8)),
                        b_.getInt64Ty()->getPointerTo()));
     join_id_++;
+
+    SizedType elem_type = CreatePointer(CreateInt8(), addrspace);
+    size_t ptr_width = b_.getPointerStorageTy(addrspace)->getIntegerBitWidth();
+    assert(b_.GetType(elem_type) == b_.getInt64Ty());
+
+    // temporary that stores the value of arg[i]
     AllocaInst *arr = b_.CreateAllocaBPF(b_.getInt64Ty(), call.func + "_r0");
-    b_.CreateProbeRead(ctx_, arr, 8, expr_, addrspace, call.loc);
+    b_.CreateProbeRead(ctx_, arr, elem_type, expr_, call.loc);
     b_.CreateProbeReadStr(
         ctx_,
         b_.CreateGEP(b_.getInt8Ty(), perfdata, b_.getInt64(8 + 8)),
@@ -699,21 +728,17 @@ void CodegenLLVM::visit(Call &call)
 
     for (unsigned int i = 1; i < bpftrace_.join_argnum_; i++)
     {
-      // argi
-      b_.CreateStore(b_.CreateAdd(expr_, b_.getInt64(8 * i)), first);
-      b_.CreateProbeRead(ctx_,
-                         second,
-                         8,
-                         b_.CreateLoad(b_.getInt64Ty(), first),
-                         addrspace,
-                         call.loc);
+      // advance to the next array element
+      expr_ = b_.CreateAdd(expr_, b_.getInt64(ptr_width / 8));
+
+      b_.CreateProbeRead(ctx_, arr, elem_type, expr_, call.loc);
       b_.CreateProbeReadStr(
           ctx_,
           b_.CreateGEP(b_.getInt8Ty(),
                        perfdata,
                        b_.getInt64(8 + 8 + i * bpftrace_.join_argsize_)),
           bpftrace_.join_argsize_,
-          b_.CreateLoad(b_.getInt64Ty(), second),
+          b_.CreateLoad(b_.getInt64Ty(), arr),
           addrspace,
           call.loc);
     }
@@ -792,9 +817,8 @@ void CodegenLLVM::visit(Call &call)
     {
       b_.CreateProbeRead(ctx_,
                          static_cast<AllocaInst *>(inet_offset),
-                         inet->type.GetSize(),
+                         inet->type,
                          expr_,
-                         inet->type.GetAS(),
                          call.loc);
     }
     else
@@ -856,12 +880,7 @@ void CodegenLLVM::visit(Call &call)
       LOG(FATAL) << "negative offset on reg() call";
     }
 
-    Value *ctx = b_.CreatePointerCast(ctx_, b_.getInt64Ty()->getPointerTo());
-    expr_ = b_.CreateLoad(
-        b_.getInt64Ty(),
-        b_.CreateGEP(b_.getInt64Ty(), ctx, b_.getInt64(offset)),
-        call.func + "_" + reg_name);
-    dyn_cast<LoadInst>(expr_)->setVolatile(true);
+    expr_ = b_.CreateRegisterRead(ctx_, offset, call.func + "_" + reg_name);
   }
   else if (call.func == "printf")
   {
@@ -1133,8 +1152,12 @@ void CodegenLLVM::visit(Call &call)
     auto left_string = getString(left_arg);
     auto right_string = getString(right_arg);
 
-    expr_ = b_.CreateStrncmp(
-        left_string.first, right_string.first, size, false);
+    expr_ = b_.CreateStrncmp(left_string.first,
+                             left_string.second,
+                             right_string.first,
+                             right_string.second,
+                             size,
+                             false);
   }
   else if (call.func == "strstr")
   {
@@ -1174,12 +1197,8 @@ void CodegenLLVM::visit(Call &call)
     if (onStack(macaddr->type))
       b_.CREATE_MEMCPY(buf, expr_, macaddr->type.GetSize(), 1);
     else
-      b_.CreateProbeRead(ctx_,
-                         static_cast<AllocaInst *>(buf),
-                         macaddr->type.GetSize(),
-                         expr_,
-                         macaddr->type.GetAS(),
-                         call.loc);
+      b_.CreateProbeRead(
+          ctx_, static_cast<AllocaInst *>(buf), macaddr->type, expr_, call.loc);
 
     expr_ = buf;
     expr_deleter_ = [this, buf]() { b_.CreateLifetimeEnd(buf); };
@@ -1283,8 +1302,7 @@ void CodegenLLVM::visit(Variable &var)
   else
   {
     auto *var_alloca = variables_[var.ident];
-    expr_ = b_.CreateLoad(var_alloca->getType()->getPointerElementType(),
-                          var_alloca);
+    expr_ = b_.CreateLoad(var_alloca->getAllocatedType(), var_alloca);
   }
 }
 
@@ -1324,7 +1342,12 @@ void CodegenLLVM::binop_string(Binop &binop)
   auto right_string = getString(binop.right);
 
   size_t len = std::min(left_string.second, right_string.second);
-  expr_ = b_.CreateStrncmp(left_string.first, right_string.first, len, inverse);
+  expr_ = b_.CreateStrncmp(left_string.first,
+                           left_string.second,
+                           right_string.first,
+                           right_string.second,
+                           len,
+                           inverse);
 }
 
 void CodegenLLVM::binop_buf(Binop &binop)
@@ -1348,7 +1371,12 @@ void CodegenLLVM::binop_buf(Binop &binop)
 
   size_t len = std::min(binop.left->type.GetSize(),
                         binop.right->type.GetSize());
-  expr_ = b_.CreateStrncmp(left_string, right_string, len, inverse);
+  expr_ = b_.CreateStrncmp(left_string,
+                           binop.left->type.GetSize(),
+                           right_string,
+                           binop.right->type.GetSize(),
+                           len,
+                           inverse);
 }
 
 void CodegenLLVM::binop_int(Binop &binop)
@@ -1604,12 +1632,9 @@ void CodegenLLVM::unop_int(Unop &unop)
     }
     case Operator::MUL: {
       // When dereferencing a 32-bit integer, only read in 32-bits, etc.
-      int size = type.GetSize();
-      auto as = type.GetAS();
-
-      auto dst_type = SizedType(type.type, size);
+      auto dst_type = SizedType(type.type, type.GetSize());
       AllocaInst *dst = b_.CreateAllocaBPF(dst_type, "deref");
-      b_.CreateProbeRead(ctx_, dst, size, expr_, as, unop.loc);
+      b_.CreateProbeRead(ctx_, dst, type, expr_, unop.loc);
       expr_ = b_.CreateIntCast(b_.CreateLoad(b_.GetType(dst_type), dst),
                                b_.getInt64Ty(),
                                type.IsSigned());
@@ -1630,10 +1655,8 @@ void CodegenLLVM::unop_ptr(Unop &unop)
       if (unop.type.IsIntegerTy() || unop.type.IsPtrTy())
       {
         auto *et = type.GetPointeeTy();
-        // Pointer always 64 bits wide
-        int size = unop.type.IsIntegerTy() ? et->GetIntBitWidth() / 8 : 8;
         AllocaInst *dst = b_.CreateAllocaBPF(*et, "deref");
-        b_.CreateProbeRead(ctx_, dst, size, expr_, type.GetAS(), unop.loc);
+        b_.CreateProbeRead(ctx_, dst, *et, expr_, unop.loc, type.GetAS());
         expr_ = b_.CreateLoad(b_.GetType(*et), dst);
         b_.CreateLifetimeEnd(dst);
       }
@@ -1836,8 +1859,12 @@ void CodegenLLVM::visit(FieldAccess &acc)
           // memset so verifier doesn't complain about reading uninitialized
           // stack
           b_.CREATE_MEMSET(dst, b_.getInt8(0), field.type.GetSize(), 1);
-          b_.CreateProbeRead(
-              ctx_, dst, field.bitfield.read_bytes, src, type.GetAS(), acc.loc);
+          b_.CreateProbeRead(ctx_,
+                             dst,
+                             b_.getInt32(field.bitfield.read_bytes),
+                             src,
+                             type.GetAS(),
+                             acc.loc);
           raw = b_.CreateLoad(field_type, dst);
           b_.CreateLifetimeEnd(dst);
         }
@@ -1993,12 +2020,7 @@ void CodegenLLVM::visit(Tuple &tuple)
     if (onStack(elem->type))
       b_.CREATE_MEMCPY(dst, expr_, elem->type.GetSize(), 1);
     else if (elem->type.IsArrayTy() || elem->type.IsRecordTy())
-      b_.CreateProbeRead(ctx_,
-                         dst,
-                         elem->type.GetSize(),
-                         expr_,
-                         elem->type.GetAS(),
-                         elem->loc);
+      b_.CreateProbeRead(ctx_, dst, elem->type, expr_, elem->loc);
     else
       b_.CreateStore(expr_, dst);
   }
@@ -2051,10 +2073,10 @@ void CodegenLLVM::visit(AssignMapStatement &assignment)
       AllocaInst *dst = b_.CreateAllocaBPF(map.type, map.ident + "_val");
       b_.CreateProbeRead(ctx_,
                          dst,
-                         map.type.GetSize(),
+                         map.type,
                          expr,
-                         assignment.expr->type.GetAS(),
-                         assignment.loc);
+                         assignment.loc,
+                         assignment.expr->type.GetAS());
       val = dst;
       self_alloca = true;
     }
@@ -2607,12 +2629,7 @@ std::tuple<Value *, CodegenLLVM::ScopedExprDeleter> CodegenLLVM::getMapKey(
         if (expr->type.IsArrayTy() || expr->type.IsRecordTy())
         {
           // We need to read the entire array/struct and save it
-          b_.CreateProbeRead(ctx_,
-                             key,
-                             expr->type.GetSize(),
-                             expr_,
-                             expr->type.GetAS(),
-                             expr->loc);
+          b_.CreateProbeRead(ctx_, key, expr->type, expr_, expr->loc);
         }
         else
         {
@@ -2682,12 +2699,7 @@ AllocaInst *CodegenLLVM::getMultiMapKey(Map &map,
       if (expr->type.IsArrayTy() || expr->type.IsRecordTy())
       {
         // Read the array/struct into the key
-        b_.CreateProbeRead(ctx_,
-                           offset_val,
-                           expr->type.GetSize(),
-                           expr_,
-                           expr->type.GetAS(),
-                           expr->loc);
+        b_.CreateProbeRead(ctx_, offset_val, expr->type, expr_, expr->loc);
         if ((expr->type.GetSize() % 8) != 0)
           aligned = false;
       }
@@ -2986,7 +2998,7 @@ MDNode *CodegenLLVM::createLoopMetadata()
   //
   // For legacy reasons, the first item of a loop metadata node must be
   // a self-reference. See https://llvm.org/docs/LangRef.html#llvm-loop
-  LLVMContext &context = orc_->getContext();
+  LLVMContext &context = *context_;
   MDNode *unroll_disable = MDNode::get(
       context, MDString::get(context, "llvm.loop.unroll.disable"));
   MDNode *loopid = MDNode::getDistinct(context,
@@ -3078,12 +3090,9 @@ void CodegenLLVM::generateWatchpointSetupProbe(
   // Pull out function argument
   Value *ctx = func->arg_begin();
   int offset = arch::arg_offset(arg_num);
-  Value *arg = b_.CreateGEP(b_.getInt8Ty(),
-                            ctx,
-                            b_.getInt64(offset * sizeof(uintptr_t)));
-  Value *addr = b_.CreateLoad(b_.getInt64Ty(),
-                              arg,
-                              "arg" + std::to_string(arg_num));
+  Value *addr = b_.CreateRegisterRead(ctx,
+                                      offset,
+                                      "arg" + std::to_string(arg_num));
 
   // Tell userspace to setup the real watchpoint
   auto elements = AsyncEvent::Watchpoint().asLLVMType(b_);
@@ -3194,12 +3203,7 @@ void CodegenLLVM::createPrintNonMapCall(Call &call, int &id)
     if (onStack(arg.type))
       b_.CREATE_MEMCPY(content_offset, expr_, arg.type.GetSize(), 1);
     else
-      b_.CreateProbeRead(ctx_,
-                         content_offset,
-                         arg.type.GetSize(),
-                         expr_,
-                         arg.type.GetAS(),
-                         arg.loc);
+      b_.CreateProbeRead(ctx_, content_offset, arg.type, expr_, arg.loc);
   }
   else
   {
@@ -3224,43 +3228,18 @@ void CodegenLLVM::generate_ir()
 void CodegenLLVM::emit_elf(const std::string &filename)
 {
   assert(state_ == State::OPT);
-  legacy::PassManager PM;
 
-#if LLVM_VERSION_MAJOR >= 10
-  auto type = llvm::CGFT_ObjectFile;
-#else
-  auto type = llvm::TargetMachine::CGFT_ObjectFile;
-#endif
-
-#if LLVM_VERSION_MAJOR >= 7
   std::error_code err;
   raw_fd_ostream out(filename, err);
-
   if (err)
     throw std::system_error(err.value(),
                             std::generic_category(),
                             "Failed to open: " + filename);
-  if (orc_->getTargetMachine().addPassesToEmitFile(PM, out, nullptr, type))
-    throw std::runtime_error("Cannot emit a file of this type");
-  PM.run(*module_.get());
+
+  emit(out);
+  out.flush();
 
   return;
-
-#else
-  std::ofstream file(filename);
-  if (!file.is_open())
-    throw std::system_error(errno,
-                            std::generic_category(),
-                            "Failed to open: " + filename);
-  std::unique_ptr<SmallVectorImpl<char>> buf(new SmallVector<char, 0>());
-  raw_svector_ostream out(*buf);
-
-  if (orc_->getTargetMachine().addPassesToEmitFile(
-          PM, out, type, true, nullptr))
-    throw std::runtime_error("Cannot emit a file of this type");
-
-  file.write(buf->data(), buf->size_in_bytes());
-#endif
 }
 
 void CodegenLLVM::optimize()
@@ -3274,7 +3253,7 @@ void CodegenLLVM::optimize()
   pto.LoopVectorization = false;
   pto.SLPVectorization = false;
 
-  llvm::PassBuilder pb(&orc_->getTargetMachine(), pto);
+  llvm::PassBuilder pb(target_machine_.get(), pto);
 
   // ModuleAnalysisManager must be destroyed first.
   llvm::LoopAnalysisManager lam;
@@ -3326,33 +3305,36 @@ bool CodegenLLVM::verify(void)
   return !ret;
 }
 
-std::unique_ptr<BpfOrc> CodegenLLVM::emit(void)
+void CodegenLLVM::emit(raw_pwrite_stream &stream)
 {
-  assert(state_ == State::OPT);
-  orc_->compile(move(module_));
-  state_ = State::DONE;
+  legacy::PassManager PM;
 
-#ifdef LLVM_ORC_V2
-  auto has_sym = [this](const std::string &s) {
-    auto sym = orc_->lookup(s);
-    return (sym && sym->getAddress());
-  };
-  for (const auto &probe : bpftrace_.resources.special_probes)
-  {
-    if (has_sym(probe.name) || has_sym(probe.orig_name))
-      return std::move(orc_);
-  }
-  for (const auto &probe : bpftrace_.resources.probes)
-  {
-    if (has_sym(probe.name) || has_sym(probe.orig_name))
-      return std::move(orc_);
-  }
+#if LLVM_VERSION_MAJOR >= 10
+  auto type = llvm::CGFT_ObjectFile;
+#else
+  auto type = llvm::TargetMachine::CGFT_ObjectFile;
 #endif
 
-  return std::move(orc_);
+  if (target_machine_->addPassesToEmitFile(PM, stream, nullptr, type))
+    throw std::runtime_error("Cannot emit a file of this type");
+  PM.run(*module_.get());
 }
 
-std::unique_ptr<BpfOrc> CodegenLLVM::compile(void)
+BpfBytecode CodegenLLVM::emit(void)
+{
+  assert(state_ == State::OPT);
+  SmallVector<char, 0> output;
+  raw_svector_ostream os(output);
+
+  emit(os);
+
+  assert(!output.empty());
+
+  state_ = State::DONE;
+  return elf::parseBpfBytecodeFromElfObject(output.data());
+}
+
+BpfBytecode CodegenLLVM::compile(void)
 {
   generate_ir();
   optimize();
@@ -3422,7 +3404,8 @@ void CodegenLLVM::readDatastructElemFromStack(Value *src_data,
   if (elem_type.IsIntegerTy() || elem_type.IsPtrTy())
   {
     // Load the correct type from src
-    expr_ = b_.CreateLoad(b_.GetType(elem_type), src, true);
+    expr_ = b_.CreateDatastructElemLoad(
+        elem_type, src, true, data_type.GetAS());
   }
   else
   {
@@ -3466,8 +3449,7 @@ void CodegenLLVM::probereadDatastructElem(Value *src_data,
   {
     // Read data onto stack
     AllocaInst *dst = b_.CreateAllocaBPF(elem_type, temp_name);
-    b_.CreateProbeRead(
-        ctx_, dst, elem_type.GetSize(), src, data_type.GetAS(), loc);
+    b_.CreateProbeRead(ctx_, dst, elem_type, src, loc, data_type.GetAS());
     expr_ = dst;
     expr_deleter_ = [this, dst]() { b_.CreateLifetimeEnd(dst); };
   }
@@ -3476,9 +3458,11 @@ void CodegenLLVM::probereadDatastructElem(Value *src_data,
     // Read data onto stack
     if (data_type.IsCtxAccess())
     {
-      expr_ = b_.CreateLoad(dst_type,
-                            b_.CreateIntToPtr(src, dst_type->getPointerTo()),
-                            true);
+      expr_ = b_.CreateDatastructElemLoad(
+          elem_type,
+          b_.CreateIntToPtr(src, dst_type->getPointerTo()),
+          true,
+          data_type.GetAS());
 
       // check context access for iter probes (required by kernel)
       if (probetype(current_attach_point_->provider) == ProbeType::iter)
@@ -3505,8 +3489,7 @@ void CodegenLLVM::probereadDatastructElem(Value *src_data,
     else
     {
       AllocaInst *dst = b_.CreateAllocaBPF(elem_type, temp_name);
-      b_.CreateProbeRead(
-          ctx_, dst, elem_type.GetSize(), src, data_type.GetAS(), loc);
+      b_.CreateProbeRead(ctx_, dst, elem_type, src, loc, data_type.GetAS());
       expr_ = b_.CreateLoad(b_.GetType(elem_type), dst);
       b_.CreateLifetimeEnd(dst);
     }
@@ -3542,9 +3525,8 @@ void CodegenLLVM::createIncDec(Unop &unop)
   else if (unop.expr->is_variable)
   {
     Variable &var = static_cast<Variable &>(*unop.expr);
-    Value *oldval = b_.CreateLoad(
-        variables_[var.ident]->getType()->getPointerElementType(),
-        variables_[var.ident]);
+    Value *oldval = b_.CreateLoad(variables_[var.ident]->getAllocatedType(),
+                                  variables_[var.ident]);
     Value *newval;
     if (is_increment)
       newval = b_.CreateAdd(oldval, b_.GetIntSameSize(step, oldval));
