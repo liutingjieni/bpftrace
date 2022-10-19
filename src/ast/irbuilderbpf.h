@@ -132,9 +132,9 @@ public:
                        uint64_t n,
                        bool inverse);
   Value *CreateStrstr(Value *val1,
+                      uint64_t str1_size,
                       Value *val2,
-                      uint64_t n1,
-                      uint64_t n2,
+                      uint64_t str2_size,
                       bool inverse);
   CallInst *CreateGetNs(bool boot_time, const location &loc);
   CallInst *CreateGetPidTgid(const location &loc);

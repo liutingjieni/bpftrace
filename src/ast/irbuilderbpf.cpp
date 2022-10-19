@@ -819,21 +819,25 @@ Value *IRBuilderBPF::CreateStrncmp(Value *str1,
 
   return result;
 }
-
 Value *IRBuilderBPF::CreateStrstr(Value *val1,
+                                  uint64_t str1_size,
                                   Value *val2,
-                                  uint64_t n1,
-                                  uint64_t n2,
+                                  uint64_t str2_size,
                                   bool inverse)
+// Value *IRBuilderBPF::CreateStrstr(Value *val1,
+//                                   Value *val2,
+//                                   uint64_t str1_size,
+//                                   uint64_t str2_size,
+//                                   bool inverse)
 {
   /*
   // This function compares whether the string val1 contains the string val2.
   // It returns true if val2 is contained by val1, false if not contained.
-  // strstr(String val1, String val2, int n1, int n2)
+  // strstr(String val1, String val2, int str1_size, int str2_size)
      {
-        for (size_t j = 0; (n1 >= n2) && (j <= n1 - n2); j++)
+        for (size_t j = 0; (str1_size >= str2_size) && (j <= str1_size - str2_size); j++)
         {
-          for (size_t i = 0; i < n2; i++)
+          for (size_t i = 0; i < str2_size; i++)
           {
             if (val2[i] == NULL)
             {
@@ -869,8 +873,8 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
   else
     literal2 = std::nullopt;
 
-  auto *val1p = dyn_cast<PointerType>(val1->getType());
-  auto *val2p = dyn_cast<PointerType>(val2->getType());
+  // auto *val1p = dyn_cast<PointerType>(val1->getType());
+  // auto *val2p = dyn_cast<PointerType>(val2->getType());
 
   Function *parent = GetInsertBlock()->getParent();
   AllocaInst *store = CreateAllocaBPF(getInt1Ty(), "strstr.result");
@@ -884,7 +888,7 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
   CreateStore(getInt1(inverse), store);
 
   Value *null_byte = getInt8(0);
-  for (size_t j = 0; (n1 >= n2) && (j <= n1 - n2); j++)
+  for (size_t j = 0; (str1_size >= str2_size) && (j <= str1_size - str2_size); j++)
   {
     BasicBlock *one_loop = BasicBlock::Create(module_.getContext(),
                                               "one.loop",
@@ -895,13 +899,13 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
       str_c = getInt8(literal1->c_str()[j]);
     else
     {
-      auto *ptr_str = CreateGEP(val1p->getPointerElementType(),
+      auto *ptr_str = CreateGEP(ArrayType::get(getInt8Ty(), str1_size),
                                 val1,
                                 { getInt32(0), getInt32(j) });
       str_c = CreateLoad(getInt8Ty(), ptr_str);
     }
 
-    for (size_t i = 0; i < n2; i++)
+    for (size_t i = 0; i < str2_size; i++)
     {
       BasicBlock *two_loop = BasicBlock::Create(module_.getContext(),
                                                 "two.loop",
@@ -915,7 +919,7 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
         l = getInt8(literal1->c_str()[i + j]);
       else
       {
-        auto *ptr_l = CreateGEP(val1p->getPointerElementType(),
+        auto *ptr_l = CreateGEP(ArrayType::get(getInt8Ty(), str1_size),
                                 val1,
                                 { getInt32(0), getInt32(i + j) });
         l = CreateLoad(getInt8Ty(), ptr_l);
@@ -926,7 +930,7 @@ Value *IRBuilderBPF::CreateStrstr(Value *val1,
         r = getInt8(literal2->c_str()[i]);
       else
       {
-        auto *ptr_r = CreateGEP(val2p->getPointerElementType(),
+        auto *ptr_r = CreateGEP(ArrayType::get(getInt8Ty(), str2_size),
                                 val2,
                                 { getInt32(0), getInt32(i) });
         r = CreateLoad(getInt8Ty(), ptr_r);

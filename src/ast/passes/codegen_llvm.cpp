@@ -1168,8 +1168,8 @@ void CodegenLLVM::visit(Call &call)
     auto right_string = getString(right_arg);
 
     expr_ = b_.CreateStrstr(left_string.first,
-                            right_string.first,
                             left_string.second,
+                            right_string.first,
                             right_string.second,
                             false);
   }
