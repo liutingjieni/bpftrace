@@ -334,9 +334,9 @@ TIMEOUT 5
 AFTER ./testprogs/syscall read
 
 NAME strcontains runtime
-RUN {{BPFTRACE}} -ve 'BEGIN { if (!strcontains("abc", "a")) { printf("OK\n"); exit(); } }'
+RUN {{BPFTRACE}} -e 'BEGIN { if (!strcontains("abc", "a")) { printf("OK\n"); exit(); } }'
 EXPECT OK
-TIMEOUT 5
+TIMEOUT 1
 
 NAME path_in_unsupported_kfunc
 PROG kfunc:vfs_read { print(path(args->file->f_path)); }
