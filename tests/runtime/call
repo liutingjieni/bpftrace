@@ -327,14 +327,14 @@ TIMEOUT 5
 AFTER ./testprogs/syscall read
 
 NAME strcontains
-RUN {{BPFTRACE}} -ve 'kfunc:filp_close { $f = path(args->filp->f_path); if (!strcontains($f, "tmp")) { printf("OK\n"); exit(); } }'
+RUN {{BPFTRACE}} -ve 'kfunc:filp_close { $f = path(args->filp->f_path); if (strcontains($f, "tmp")) { printf("OK\n"); exit(); } }'
 EXPECT OK
 REQUIRES_FEATURE dpath kfunc
 TIMEOUT 5
 AFTER ./testprogs/syscall read
 
 NAME strcontains runtime
-RUN {{BPFTRACE}} -e 'BEGIN { if (!strcontains("abc", "a")) { printf("OK\n"); exit(); } }'
+RUN {{BPFTRACE}} -ve 'BEGIN { if (strcontains("abc", "a")) { printf("OK\n"); exit(); } }'
 EXPECT OK
 TIMEOUT 1
 
